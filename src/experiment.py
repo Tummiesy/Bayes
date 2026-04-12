@@ -96,6 +96,7 @@ class ExperimentRunner:
         ensure_dir(self.output_root)
         summary_rows: List[Dict] = []
         macro_f1_by_dataset: Dict[str, float] = {}
+        feature_dim_summary_rows: List[Dict] = []
 
         for dataset_name in self.config.datasets:
             log(f"Running dataset: {dataset_name}")
@@ -117,6 +118,7 @@ class ExperimentRunner:
             test_text_clean = preprocess_corpus(test_text.tolist(), self.config.preprocess)
 
             all_rows: List[Dict] = []
+            feature_dim_rows: List[Dict] = []
 
             for vectorizer_name in self.config.vectorizers:
                 for ngram_range in self.config.ngram_ranges:
@@ -131,8 +133,17 @@ class ExperimentRunner:
                                     "model": model_name,
                                     "alpha": alpha,
                                 }
+                                feature_dim_row = {
+                                    "dataset": dataset_name,
+                                    "vectorizer": vectorizer_name,
+                                    "ngram_range": str(ngram_range),
+                                    "min_df": min_df,
+                                    "model": model_name,
+                                    "alpha": alpha,
+                                    "train_samples": len(train_text_clean),
+                                }
                                 try:
-                                    _, dev_pred = self._fit_predict(
+                                    pipeline, dev_pred = self._fit_predict(
                                         train_texts=train_text_clean,
                                         train_labels=train_label.tolist(),
                                         eval_texts=dev_text_clean,
@@ -142,6 +153,10 @@ class ExperimentRunner:
                                         model_name=model_name,
                                         alpha=alpha,
                                     )
+                                    # feature_dim = vocabulary size learned from train texts.
+                                    feature_dim_row["feature_dim"] = len(pipeline.named_steps["vectorizer"].vocabulary_)
+                                    feature_dim_row["status"] = "ok"
+                                    feature_dim_row["error"] = ""
 
                                     metrics = compute_metrics(dev_label.tolist(), dev_pred.tolist())
                                     config_row.update(metrics)
@@ -158,10 +173,15 @@ class ExperimentRunner:
                                             "error": str(exc),
                                         }
                                     )
+                                    feature_dim_row["feature_dim"] = float("nan")
+                                    feature_dim_row["status"] = "failed"
+                                    feature_dim_row["error"] = str(exc)
 
                                 all_rows.append(config_row)
+                                feature_dim_rows.append(feature_dim_row)
 
             all_experiments_df = pd.DataFrame(all_rows)
+            feature_dimensions_df = pd.DataFrame(feature_dim_rows)
             all_experiments_df["ngram_complexity"] = all_experiments_df["ngram_range"].apply(
                 lambda s: self._is_unigram_only(literal_eval(s))
             )
@@ -226,9 +246,11 @@ class ExperimentRunner:
                 all_experiments_df.drop(columns=["ngram_complexity", "vectorizer_complexity"]),
                 dataset_output_dir / "all_experiments.csv",
             )
+            save_dataframe(feature_dimensions_df, dataset_output_dir / "feature_dimensions.csv")
             save_json(best_config, dataset_output_dir / "best_config.json")
             save_json(test_metrics, dataset_output_dir / "test_metrics.json")
             save_text(report, dataset_output_dir / "classification_report.txt")
+            feature_dim_summary_rows.extend(feature_dim_rows)
 
             summary_row = {
                 "dataset": dataset_name,
@@ -248,7 +270,9 @@ class ExperimentRunner:
             log(f"Finished dataset: {dataset_name}")
 
         summary_df = pd.DataFrame(summary_rows).sort_values(by="dataset").reset_index(drop=True)
+        feature_dim_summary_df = pd.DataFrame(feature_dim_summary_rows)
         save_dataframe(summary_df, self.output_root / "summary_results.csv")
+        save_dataframe(feature_dim_summary_df, self.output_root / "feature_dimensions_summary.csv")
         save_macro_f1_barplot(macro_f1_by_dataset, self.output_root / "best_test_macro_f1_barplot.png")
 
         analysis_lines = ["Best test Macro-F1 by dataset:"]
